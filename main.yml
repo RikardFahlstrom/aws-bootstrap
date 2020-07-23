@@ -1,0 +1,152 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+
+Parameters:
+# These are the input parameters for the template. 
+# They give us the flexibility to change some settings without having to modify the template code.
+# The input parameters is needed to accept the instance type
+# The parameter names need to match the parameters used in deploy-infra.sh
+
+  EC2InstanceType:
+    Type: String
+  EC2AMI:
+    # Launching latest Amazon Linux AMI in an AWS CloudFormation stack
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+
+Resources:
+# This is the bulk of the template. 
+# Here is where we define and configure the resources that CloudFormation will manage for us.
+
+  SecurityGroup:
+  # This functions like a firewall for the EC2 instance that we’ll create.
+  # We need to add a rule to allow TCP traffic to port 8080 (to reach our application)
+  # and to port 22 (for SSH access).
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'Internal Security group for ${AWS::StackName}'
+
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  InstanceRole:
+  # IAM roles is used to defined permissions for our EC2 instance.
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service:
+             - "ec2.amazonaws.com"
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  InstanceProfile:
+  # The instance profile ties our IAM role to the EC2 instance we will create
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Roles:
+        - Ref: InstanceRole
+
+  Instance:
+  # Definition of the EC2 instance itself
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+        Count: 1
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+          # Prerequisites that CloudFormation will install on our instance
+            yum:
+              wget: []
+              unzip: []
+    Properties:
+      ImageId: !Ref EC2AMI
+      InstanceType: !Ref EC2InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      Monitoring: true
+      SecurityGroupIds:
+        - !GetAtt SecurityGroup.GroupId
+      UserData:
+        # This allows us to run commands on our instance when it launches
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+
+          # send script output to /tmp so we can debug boot failures
+          exec > /tmp/userdata.log 2>&1
+
+          # Update all packages
+          yum -y update
+
+          # Get latest cfn scripts; https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/best- practices.html#cfninit
+          yum install -y aws-cfn-bootstrap
+
+          # Have CloudFormation install any files and packages from the metadata
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --region ${AWS::Region} --resource Instance
+
+          cat > /tmp/install_script.sh << EOF
+            # START
+            echo "Setting up NodeJS Environment"
+            curl https://raw.githubusercontent.com/nvm-sh/nvm/v0.34.0/install.sh | bash
+
+            # Dot source the files to ensure that variables are available within the current shell
+            . /home/ec2-user/.nvm/nvm.sh
+            . /home/ec2-user/.bashrc
+
+            # Install NVM, NPM, Node.JS
+            nvm alias default v12.7.0
+            nvm install v12.7.0
+            nvm use v12.7.0
+
+            # Download latest code, unzip it into /home/ec2-user/app
+            wget https://github.com/RikardFahlstrom/aws-bootstrap/archive/master.zip
+            unzip master.zip
+            mv aws-bootstrap-master app
+
+            # Create log directory
+            mkdir -p /home/ec2-user/app/logs
+
+            # Run server
+            cd app
+            npm install
+            npm start
+          EOF
+
+          chown ec2-user:ec2-user /tmp/install_script.sh && chmod a+x /tmp/install_script.sh
+          sleep 1; su - ec2-user -c "/tmp/install_script.sh"
+
+          # Signal to CloudFormation that the instance is ready
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --region ${AWS::Region} --resource Instance
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+Outputs:
+# These are like return values for the template. 
+# We use them to make it easy to find some of the resources that CloudFormation will create for us.
+
+  InstanceEndpoint:
+  # This will export the DNS name of our newly created instance as a template output.
+    Description: The DNS name for the created instance
+    Value: !Sub "http://${Instance.PublicDnsName}:8080"
+    Export:
+      Name: InstanceEndpoint
