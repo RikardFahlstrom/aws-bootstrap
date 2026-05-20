@@ -8,7 +8,7 @@
     "build": "echo 'Building...'"
   },
   "dependencies": {
-    "pm2": "^5.4.3"
+    "pm2": "^7.0.0"
   },
   "devDependencies": {},
   "keywords": [],
